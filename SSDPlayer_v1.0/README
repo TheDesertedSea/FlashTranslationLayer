@@ -1,0 +1,40 @@
+SSDPlayer Visualization Platform Version 1.0 
+
+This distribution contains
+--------------------------
+SSDPlayer.jar
+  Java executable
+resources/ssd_config.xml
+  Configuration file
+traces/
+  Sample trace directory
+
+System Requirements
+-------------------
+In order to execute SSDPlayer, you must have Java Runtime Environment 
+(JRE) version 1.7 or higher installed on your computer.
+
+Getting Started
+---------------
+Windows Users
+  Execute SSDPlayer by double clicking on SSDPlayer.jar. 
+Linux and Mac Users
+  Execute SSDPlayer by typing "java -jar SSDPlayer.jar" in the command line.
+
+
+Please consult the User's Guide for further instructions. 
+The User's Guide can be downloaded at 
+  http://www.cs.technion.ac.il/~gala/SSDPlayer/
+
+Fair Use
+---------
+SSDPlayer is distributed under the The BSD 2-Clause License
+(See SSDPlayer_Version_1_0_Copyright in this directory).
+
+If you use SSDPlayer for academic purposes, please cite the original
+HotStorage '15 paper for reference:
+
+Gala Yadgar, Roman Shor, Eitan Yaakobi, Assaf Schuster.
+It's Not Where Your Data Is, It's How It Got There. 
+In proceedings of 7th USENIX Workshop on Hot Topics in Storage
+and File Systems (HotStorage '15), July 2015, Santa Clara, CA.
