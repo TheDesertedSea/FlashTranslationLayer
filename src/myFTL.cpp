@@ -11,6 +11,51 @@
 #endif
 
 template <typename PageType>
+class LogReservationBlockAllocatorBase {
+ protected:
+  size_t cleaning_block_id_;
+  size_t highest_log_block_id_;
+  size_t highest_user_block_id_;
+ public:
+  LogReservationBlockAllocatorBase(size_t cleaning_block_id, size_t highest_log_block_id, size_t highest_user_block_id) 
+    : cleaning_block_id_(cleaning_block_id), highest_log_block_id_(highest_log_block_id)
+      , highest_user_block_id_(highest_user_block_id) {}
+  LogReservationBlockAllocatorBase(): LogReservationBlockAllocatorBase(0, 0, 0) {}
+  virtual ~LogReservationBlockAllocatorBase(){};
+  
+  virtual void DataBlockWritten(size_t log_block_id) = 0;
+  virtual void LogBlockWritten(size_t log_block_id, bool new_page) = 0;
+  virtual size_t GetLogBlock(const ExecCallBack<PageType> &func) = 0;
+};
+
+template <typename PageType>
+class RoundRobinAllocator : public LogReservationBlockAllocatorBase<PageType> {
+  size_t next_log_block_id_;
+ public:
+  RoundRobinAllocator(size_t cleaning_block_id, size_t highest_log_block_id, size_t highest_user_block_id) 
+    : LogReservationBlockAllocatorBase<PageType>(cleaning_block_id, highest_log_block_id, highest_user_block_id)
+      , next_log_block_id_(highest_log_block_id) {}
+  RoundRobinAllocator(): RoundRobinAllocator(0, 0, 0) {}
+  virtual ~RoundRobinAllocator() {}
+
+  void DataBlockWritten(size_t log_block_id) override {
+    (void)block_id;
+  }
+
+  void LogBlockWritten(size_t log_block_id, bool new_page) override {
+    (void)block_id;
+    (void)new_page;
+  }
+
+  size_t GetLogBlock(const ExecCallBack<PageType> &func) override {
+    if(next_log_block_id_ == cleaning_block_id_) {
+      return highest_user_block_id_;
+    }
+    return next_log_block_id_--;
+  }
+};
+
+template <typename PageType>
 class MyFTL : public FTLBase<PageType> {
 
   /* Number of packages in a ssd */
@@ -39,6 +84,8 @@ class MyFTL : public FTLBase<PageType> {
   /* Capacity of a ssd */
   size_t ssd_capacity_;
 
+  /* cleaning block */
+  size_t cleaning_block_id_;
   /* highest log-reservation block */
   size_t highest_log_block_id_;
   /* highest user block */
@@ -88,13 +135,14 @@ class MyFTL : public FTLBase<PageType> {
     package_capacity_ = die_capacity_ * package_size_;
     ssd_capacity_ = package_capacity_ * ssd_size_;
 
-    highest_log_block_id_ = ssd_capacity_ / block_capacity_ - 1;
-    highest_user_block_id_ = highest_log_block_id_ - (highest_log_block_id_ + 1) * ((double)op_ / 100);
+    cleaning_block_id_ = ssd_capacity_ / block_capacity_ - 1;
+    highest_log_block_id_ = cleaning_block_id_ - 1;
+    highest_user_block_id_ = cleaning_block_id_ - (highest_log_block_id_ + 1) * ((double)op_ / 100);
     next_log_block_id_ = highest_log_block_id_;
 
     highest_user_lba_ = (highest_user_block_id_ + 1) * block_capacity_ - 1;
 
-    blocks.resize(highest_log_block_id_ + 1, Block(block_capacity_));
+    blocks.resize(highest_user_block_id_ + 1, Block(block_capacity_));
 
     printf("SSD Configuration: %zu, %zu, %zu, %zu, %zu\n", ssd_size_,
            package_size_, die_size_, plane_size_, block_size_);
@@ -225,6 +273,8 @@ class MyFTL : public FTLBase<PageType> {
     auto page = lba % block_capacity_;
     return Address(package, die, plane, block, page);
   }
+
+
 
 };
 
