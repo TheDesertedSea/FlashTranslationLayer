@@ -19,8 +19,10 @@ class GCPolicyBase {
   GCPolicyBase() = default;
   virtual ~GCPolicyBase() = default;
   
+  virtual void LogBlockMapped(size_t log_block_id, int data_block_valid_pages) = 0;
   virtual void DataBlockWritten(size_t log_block_id) = 0;
-  virtual void LogBlockWritten(size_t log_block_id, bool new_page) = 0;
+  virtual void LogBlockWritten(size_t log_block_id) = 0;
+  virtual void LogBlockUnmapped(size_t log_block_id) = 0;
   virtual size_t GetGCBlock() = 0;
 };
 
@@ -37,13 +39,21 @@ class GCPolicyRoundRobin : public GCPolicyBase {
   GCPolicyRoundRobin() = default;
   virtual ~GCPolicyRoundRobin() = default;
 
+  virtual void LogBlockMapped(size_t log_block_id, int data_block_valid_pages) override {
+    (void)log_block_id;
+    (void)data_block_valid_pages;
+  }
+
   void DataBlockWritten(size_t log_block_id) override {
     (void)log_block_id;
   }
 
-  void LogBlockWritten(size_t log_block_id, bool new_page) override {
+  void LogBlockWritten(size_t log_block_id) override {
     (void)log_block_id;
-    (void)new_page;
+  }
+
+  virtual void LogBlockUnmapped(size_t log_block_id) override {
+    (void)log_block_id;
   }
 
   size_t GetGCBlock() override {
@@ -94,13 +104,21 @@ class GCPolicyLRU: public GCPolicyBase {
     }
   }
 
+  virtual void LogBlockMapped(size_t log_block_id, int data_block_valid_pages) override {
+    (void)log_block_id;
+    (void)data_block_valid_pages;
+  }
+
   void DataBlockWritten(size_t log_block_id) override {
     (void)log_block_id;
   }
 
-  void LogBlockWritten(size_t log_block_id, bool new_page) override {
-    (void)new_page;
+  void LogBlockWritten(size_t log_block_id) override {
     UpdateLRU(log_block_id);
+  }
+
+  virtual void LogBlockUnmapped(size_t log_block_id) override {
+    (void)log_block_id;
   }
 
   size_t GetGCBlock() override {
@@ -124,6 +142,108 @@ class GCPolicyLRU: public GCPolicyBase {
     block->next = head_;
     head_->prev = block;
     head_ = block;
+  }
+};
+
+class GCPolicyGreedy: public GCPolicyBase {
+  std::vector<int> block_valid_pages_;
+  size_t lowest_log_block_id_;
+
+ public:
+  GCPolicyGreedy(size_t highest_log_block_id, size_t highest_user_block_id) {
+    lowest_log_block_id_ = highest_user_block_id + 1;
+    block_valid_pages_.resize(highest_log_block_id - highest_user_block_id, 0);
+  }
+
+  virtual ~GCPolicyGreedy() = default;
+
+  virtual void LogBlockMapped(size_t log_block_id, int data_block_valid_pages) override {
+    block_valid_pages_[log_block_id - lowest_log_block_id_] = data_block_valid_pages;
+  }
+
+  void DataBlockWritten(size_t log_block_id) override {
+    block_valid_pages_[log_block_id - lowest_log_block_id_]++;
+  }
+
+  void LogBlockWritten(size_t log_block_id) override {
+    (void)log_block_id;
+  }
+
+  virtual void LogBlockUnmapped(size_t log_block_id) override {
+    block_valid_pages_[log_block_id - lowest_log_block_id_] = 0;
+  }
+
+  size_t GetGCBlock() override {
+    size_t gc_block_idx = 0;
+    int min_valid_pages = block_valid_pages_[0];
+    for(size_t i = 1; i < block_valid_pages_.size(); i++) {
+      if(block_valid_pages_[i] < min_valid_pages) {
+        min_valid_pages = block_valid_pages_[i];
+        gc_block_idx = i;
+      }
+    }
+    auto gc_block_id = gc_block_idx + lowest_log_block_id_;
+    DEBUG_INST(std::cout << "[GC Block]: " << gc_block_id << std::endl);
+    return gc_block_id;
+  }
+};
+
+class GCPolicyCostBenefit: public GCPolicyBase {
+
+  struct BlockInfo {
+    size_t ts_;
+    int valid_pages_;
+    BlockInfo(size_t ts, int valid_pages) : ts_(ts), valid_pages_(valid_pages) {}
+    BlockInfo() : BlockInfo(0, 0) {}
+  };
+
+  std::vector<BlockInfo> block_infos_;
+  size_t lowest_log_block_id_;
+  size_t current_ts_;
+  size_t block_capacity_;
+
+ public:
+  GCPolicyCostBenefit(size_t highest_log_block_id, size_t highest_user_block_id, size_t block_capacity) {
+    lowest_log_block_id_ = highest_user_block_id + 1;
+    block_infos_.resize(highest_log_block_id - highest_user_block_id, BlockInfo(0, 0));
+    current_ts_ = 0;
+    block_capacity_ = block_capacity;
+  }
+
+  virtual ~GCPolicyCostBenefit() = default;
+
+  virtual void LogBlockMapped(size_t log_block_id, int data_block_valid_pages) override {
+    block_infos_[log_block_id - lowest_log_block_id_].valid_pages_ = data_block_valid_pages;
+  }
+
+  void DataBlockWritten(size_t log_block_id) override {
+    block_infos_[log_block_id - lowest_log_block_id_].valid_pages_++;
+  }
+
+  void LogBlockWritten(size_t log_block_id) override {
+    block_infos_[log_block_id - lowest_log_block_id_].ts_ = current_ts_++;
+  }
+
+  virtual void LogBlockUnmapped(size_t log_block_id) override {
+    block_infos_[log_block_id - lowest_log_block_id_].valid_pages_ = 0;
+    block_infos_[log_block_id - lowest_log_block_id_].ts_ = current_ts_;
+  }
+
+  size_t GetGCBlock() override {
+    size_t gc_block_idx = 0;
+    double utilization = block_infos_[0].valid_pages_ / (2 * block_capacity_);
+    double largest_benefit_cost_ratio = (1 - utilization) / (1 + utilization) * (current_ts_ - block_infos_[0].ts_);
+    for(size_t i = 1; i < block_infos_.size(); i++) {
+      utilization = block_infos_[i].valid_pages_ / (2 * block_capacity_);
+      double benefit_cost_ratio = (1 - utilization) / (1 + utilization) * (current_ts_ - block_infos_[i].ts_);
+      if(benefit_cost_ratio > largest_benefit_cost_ratio) {
+        largest_benefit_cost_ratio = benefit_cost_ratio;
+        gc_block_idx = i;
+      }
+    }
+    auto gc_block_id = gc_block_idx + lowest_log_block_id_;
+    DEBUG_INST(std::cout << "[GC Block]: " << gc_block_id << std::endl);
+    return gc_block_id;
   }
 };
 
@@ -178,7 +298,8 @@ class MyFTL : public FTLBase<PageType> {
     int log_block_id; // -1: no log-reservation mapping, >=0: log-reservation block id
     int next_log_page_id; // next free page id in the log-reservation block
     size_t erase_count; // erase count of the block
-    DataBlock(size_t block_capacity) : page_states(block_capacity, -1), log_block_id(-1), next_log_page_id(0) {}
+    DataBlock(size_t block_capacity) : page_states(block_capacity, -1), log_block_id(-1)
+      , next_log_page_id(0), erase_count(0) {}
     DataBlock(): DataBlock(0) {}
   };
 
@@ -186,13 +307,12 @@ class MyFTL : public FTLBase<PageType> {
     size_t mapped_data_block_id;
     size_t erase_count;
     LogBlock(size_t mapped_data_block_id) : mapped_data_block_id(mapped_data_block_id), erase_count(0) {}
-    LogBlock() : LogBlock(0) {}
+    LogBlock() : LogBlock(cleaning_block_id_) {}
   };
 
   /* blocks */
   std::vector<DataBlock> data_blocks_;
   std::vector<LogBlock> log_blocks_;
-  std::vector<size_t> log_data_mapping_;
 
   std::shared_ptr<GCPolicyBase> gc_policy_;
 
@@ -226,7 +346,6 @@ class MyFTL : public FTLBase<PageType> {
 
     data_blocks_.resize(highest_user_block_id_ + 1, DataBlock(block_capacity_));
     log_blocks_.resize(highest_log_block_id_ - highest_user_block_id_, LogBlock(-1));
-    log_data_mapping_.resize(highest_log_block_id_ - highest_user_block_id_, cleaning_block_id_);
 
     switch(conf->GetGCPolicy()) {
       case 0:
@@ -234,6 +353,12 @@ class MyFTL : public FTLBase<PageType> {
         break;
       case 1:
         gc_policy_ = std::make_shared<GCPolicyLRU>(highest_log_block_id_, highest_user_block_id_);
+        break;
+      case 2:
+        gc_policy_ = std::make_shared<GCPolicyGreedy>(highest_log_block_id_, highest_user_block_id_);
+        break;
+      case 3:
+        gc_policy_ = std::make_shared<GCPolicyCostBenefit>(highest_log_block_id_, highest_user_block_id_, block_capacity_);
         break;
       default:
         throw std::runtime_error("Unknown GC policy");
@@ -332,30 +457,43 @@ class MyFTL : public FTLBase<PageType> {
       if(next_log_block_id_ == highest_user_block_id_) {
         // no more log-reservation block, do garbage collection
         auto gc_block_id = gc_policy_->GetGCBlock();
-        CleanLogBlock(gc_block_id, func);
+        if(!CleanLogBlock(gc_block_id, func)) {
+          DEBUG_INST(std::cout << "no more erase" << std::endl)
+          return std::make_pair(ExecState::FAILURE, Address());
+        }
         data_blocks_[block_id].log_block_id = gc_block_id;
         data_blocks_[block_id].next_log_page_id = 0;
-        log_data_mapping_[gc_block_id - highest_user_block_id_ - 1] = block_id;
+        log_blocks_[gc_block_id - highest_user_block_id_ - 1].mapped_data_block_id = block_id;
         DEBUG_INST(std::cout << "mapping to gc block" << std::endl)
       } else {
         data_blocks_[block_id].log_block_id = next_log_block_id_--;
         data_blocks_[block_id].next_log_page_id = 0;
-        log_data_mapping_[data_blocks_[block_id].log_block_id - highest_user_block_id_ - 1] = block_id;
+        log_blocks_[data_blocks_[block_id].log_block_id - highest_user_block_id_ - 1].mapped_data_block_id = block_id;
         DEBUG_INST(std::cout << "mapping to free log-reservation block: " << data_blocks_[block_id].log_block_id << std::endl)
       }
+      int valid_pages = 0;
+      for(size_t i = 0; i < block_capacity_; i++) {
+        if(data_blocks_[block_id].page_states[i] != -1) {
+          valid_pages++;
+        }
+      }
+      gc_policy_->LogBlockMapped(data_blocks_[block_id].log_block_id, valid_pages);
     }
     
     if((size_t)data_blocks_[block_id].next_log_page_id == block_capacity_) {
       // no more log-reservation page, do garbage collection
       auto gc_block_id = data_blocks_[block_id].log_block_id;
-      CleanLogBlock(gc_block_id, func);
+      if(!CleanLogBlock(gc_block_id, func)) {
+        DEBUG_INST(std::cout << "no more erase" << std::endl)
+        return std::make_pair(ExecState::FAILURE, Address());
+      }
       data_blocks_[block_id].log_block_id = gc_block_id;
       data_blocks_[block_id].next_log_page_id = 0;
-      log_data_mapping_[gc_block_id - highest_user_block_id_ - 1] = block_id;
+      log_blocks_[gc_block_id - highest_user_block_id_ - 1].mapped_data_block_id = block_id;
       DEBUG_INST(std::cout << "clean log-reservation block" << std::endl);
     }
 
-    gc_policy_->LogBlockWritten(data_blocks_[block_id].log_block_id, data_blocks_[block_id].page_states[page_id] == -2);
+    gc_policy_->LogBlockWritten(data_blocks_[block_id].log_block_id);
     auto mapped_page_id = data_blocks_[block_id].next_log_page_id++;
     data_blocks_[block_id].page_states[page_id] = mapped_page_id;
     auto mapped_lba = data_blocks_[block_id].log_block_id * block_capacity_ + mapped_page_id;
@@ -385,10 +523,16 @@ class MyFTL : public FTLBase<PageType> {
     return Address(package, die, plane, block, page);
   }
 
-  void CleanLogBlock(size_t log_block_id, const ExecCallBack<PageType> &func) {
-    size_t data_block_id = log_data_mapping_[log_block_id - highest_user_block_id_ - 1];
+  bool CleanLogBlock(size_t log_block_id, const ExecCallBack<PageType> &func) {
+    size_t data_block_id = log_blocks_[log_block_id - highest_user_block_id_ - 1].mapped_data_block_id;
     DEBUG_INST(std::cout << "[CleanLogBlock] " << log_block_id << " data block: " << data_block_id << std::endl)
     auto& data_block = data_blocks_[data_block_id];
+    auto log_block_idx = log_block_id - highest_user_block_id_ - 1;
+    if(data_block.erase_count == max_erases_ || cleaning_block_erase_count_ == max_erases_ 
+      || log_blocks_[log_block_idx].erase_count == max_erases_) {
+      return false;
+    }
+
     size_t next_cleaning_page_id = 0;
     // copy data from data block and log block to cleaning block
     for(size_t i = 0; i < block_capacity_; i++) {
@@ -415,6 +559,8 @@ class MyFTL : public FTLBase<PageType> {
     // erase data block and log block
     func(OpCode::ERASE, GetAddress(data_block_id * block_capacity_));
     func(OpCode::ERASE, GetAddress(log_block_id * block_capacity_));
+    data_block.erase_count++;
+    log_blocks_[log_block_idx].erase_count++;
 
     // copy data from cleaning block to data block
     for(size_t i = 0; i < block_capacity_; i++) {
@@ -432,9 +578,12 @@ class MyFTL : public FTLBase<PageType> {
 
     // erase cleaning block
     func(OpCode::ERASE, GetAddress(cleaning_block_id_ * block_capacity_));
+    cleaning_block_erase_count_++;
     // unmap log block
     data_block.log_block_id = -1;
-    log_data_mapping_[log_block_id - highest_user_block_id_ - 1] = cleaning_block_id_;
+    log_blocks_[log_block_id - highest_user_block_id_ - 1].mapped_data_block_id = cleaning_block_id_;
+    gc_policy_->LogBlockUnmapped(log_block_id);
+    return true;
   }
 
 };
