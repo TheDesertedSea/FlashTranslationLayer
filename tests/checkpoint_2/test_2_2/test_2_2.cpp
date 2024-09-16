@@ -43,6 +43,7 @@ int main(int argc, char *argv[]) {
         if (num_block_touched <= num_nondata_blocks) {
             const size_t addr = num_block_touched * BLOCK_SIZE;
             TEST_PAGE_TYPE page_value1 = rand() % 18746;
+            // std::cout << "addr: " << addr << " page_value1: " << page_value1 << std::endl;
             TEST_PAGE_TYPE page_value2;
             r = test.Write(log_file_stream, addr, ~page_value1);
             if (r != 1) goto failed;
@@ -75,6 +76,7 @@ int main(int argc, char *argv[]) {
         r = test.Read(log_file_stream, addr, &page_value2);
         if (r != 1) goto failed;
 
+        // std::cout << "addr: " << addr << " page_value1: " << page_value1 << " page_value2: " << page_value2 << std::endl;
         if (page_value1 != page_value2) {
             fprintf(log_file_stream, "Reading LBA %zu does not get the right value\n", addr);
             goto failed;

@@ -1,0 +1,386 @@
+------------------------------------------------------------
+----------------
+Writing LBA 0
+LBA 0 written
+----------------
+Writing LBA 0
+LBA 0 written
+----------------
+Reading LBA 0
+LBA 0 read
+----------------
+Writing LBA 16
+LBA 16 written
+----------------
+Writing LBA 16
+LBA 16 written
+----------------
+Reading LBA 16
+LBA 16 read
+----------------
+Writing LBA 32
+LBA 32 written
+----------------
+Writing LBA 32
+LBA 32 written
+----------------
+Reading LBA 32
+LBA 32 read
+----------------
+Writing LBA 48
+LBA 48 written
+----------------
+Writing LBA 48
+LBA 48 written
+----------------
+Reading LBA 48
+LBA 48 read
+----------------
+Writing LBA 64
+LBA 64 written
+----------------
+Writing LBA 64
+LBA 64 written
+----------------
+Reading LBA 64
+LBA 64 read
+----------------
+Writing LBA 80
+LBA 80 written
+----------------
+Writing LBA 80
+LBA 80 written
+----------------
+Reading LBA 80
+LBA 80 read
+----------------
+Writing LBA 96
+LBA 96 written
+----------------
+Writing LBA 96
+LBA 96 written
+----------------
+Reading LBA 96
+LBA 96 read
+----------------
+Writing LBA 112
+LBA 112 written
+----------------
+Writing LBA 112
+LBA 112 written
+----------------
+Reading LBA 112
+LBA 112 read
+----------------
+Writing LBA 128
+LBA 128 written
+----------------
+Writing LBA 128
+LBA 128 written
+----------------
+Reading LBA 128
+LBA 128 read
+----------------
+Writing LBA 144
+LBA 144 written
+----------------
+Writing LBA 144
+LBA 144 written
+----------------
+Reading LBA 144
+LBA 144 read
+----------------
+Writing LBA 160
+LBA 160 written
+----------------
+Writing LBA 160
+LBA 160 written
+----------------
+Reading LBA 160
+LBA 160 read
+----------------
+Writing LBA 176
+LBA 176 written
+----------------
+Writing LBA 176
+LBA 176 written
+----------------
+Reading LBA 176
+LBA 176 read
+----------------
+Writing LBA 192
+LBA 192 written
+----------------
+Writing LBA 192
+LBA 192 written
+----------------
+Reading LBA 192
+LBA 192 read
+----------------
+Writing LBA 208
+LBA 208 written
+----------------
+Writing LBA 208
+LBA 208 written
+----------------
+Reading LBA 208
+LBA 208 read
+----------------
+Writing LBA 224
+LBA 224 written
+----------------
+Writing LBA 224
+LBA 224 written
+----------------
+Reading LBA 224
+LBA 224 read
+----------------
+Writing LBA 240
+LBA 240 written
+----------------
+Writing LBA 240
+LBA 240 written
+----------------
+Reading LBA 240
+LBA 240 read
+----------------
+Writing LBA 256
+LBA 256 written
+----------------
+Writing LBA 256
+LBA 256 written
+----------------
+Reading LBA 256
+LBA 256 read
+----------------
+Writing LBA 272
+LBA 272 written
+----------------
+Writing LBA 272
+LBA 272 written
+----------------
+Reading LBA 272
+LBA 272 read
+----------------
+Writing LBA 288
+LBA 288 written
+----------------
+Writing LBA 288
+LBA 288 written
+----------------
+Reading LBA 288
+LBA 288 read
+----------------
+Writing LBA 304
+LBA 304 written
+----------------
+Writing LBA 304
+LBA 304 written
+----------------
+Reading LBA 304
+LBA 304 read
+----------------
+Writing LBA 320
+LBA 320 written
+----------------
+Writing LBA 320
+LBA 320 written
+----------------
+Reading LBA 320
+LBA 320 read
+----------------
+Writing LBA 336
+LBA 336 written
+----------------
+Writing LBA 336
+LBA 336 written
+----------------
+Reading LBA 336
+LBA 336 read
+----------------
+Writing LBA 352
+LBA 352 written
+----------------
+Writing LBA 352
+LBA 352 written
+----------------
+Reading LBA 352
+LBA 352 read
+----------------
+Writing LBA 368
+LBA 368 written
+----------------
+Writing LBA 368
+LBA 368 written
+----------------
+Reading LBA 368
+LBA 368 read
+----------------
+Writing LBA 384
+LBA 384 written
+----------------
+Writing LBA 384
+LBA 384 written
+----------------
+Reading LBA 384
+LBA 384 read
+----------------
+Writing LBA 400
+LBA 400 written
+----------------
+Writing LBA 400
+LBA 400 written
+----------------
+Reading LBA 400
+LBA 400 read
+----------------
+Writing LBA 416
+LBA 416 written
+----------------
+Writing LBA 416
+LBA 416 written
+----------------
+Reading LBA 416
+LBA 416 read
+----------------
+Writing LBA 432
+LBA 432 written
+----------------
+Writing LBA 432
+LBA 432 written
+----------------
+Reading LBA 432
+LBA 432 read
+----------------
+Writing LBA 448
+LBA 448 written
+----------------
+Writing LBA 448
+LBA 448 written
+----------------
+Reading LBA 448
+LBA 448 read
+----------------
+Writing LBA 464
+LBA 464 written
+----------------
+Writing LBA 464
+LBA 464 written
+----------------
+Reading LBA 464
+LBA 464 read
+----------------
+Writing LBA 480
+LBA 480 written
+----------------
+Writing LBA 480
+LBA 480 written
+----------------
+Reading LBA 480
+LBA 480 read
+----------------
+Writing LBA 496
+LBA 496 written
+----------------
+Writing LBA 496
+LBA 496 written
+----------------
+Reading LBA 496
+LBA 496 read
+>>> GC detected <<<
+----------------
+Reading LBA 0
+LBA 0 read
+----------------
+Reading LBA 16
+LBA 16 read
+----------------
+Reading LBA 32
+LBA 32 read
+----------------
+Reading LBA 48
+LBA 48 read
+----------------
+Reading LBA 64
+LBA 64 read
+----------------
+Reading LBA 80
+LBA 80 read
+----------------
+Reading LBA 96
+LBA 96 read
+----------------
+Reading LBA 112
+LBA 112 read
+----------------
+Reading LBA 128
+LBA 128 read
+----------------
+Reading LBA 144
+LBA 144 read
+----------------
+Reading LBA 160
+LBA 160 read
+----------------
+Reading LBA 176
+LBA 176 read
+----------------
+Reading LBA 192
+LBA 192 read
+----------------
+Reading LBA 208
+LBA 208 read
+----------------
+Reading LBA 224
+LBA 224 read
+----------------
+Reading LBA 240
+LBA 240 read
+----------------
+Reading LBA 256
+LBA 256 read
+----------------
+Reading LBA 272
+LBA 272 read
+----------------
+Reading LBA 288
+LBA 288 read
+----------------
+Reading LBA 304
+LBA 304 read
+----------------
+Reading LBA 320
+LBA 320 read
+----------------
+Reading LBA 336
+LBA 336 read
+----------------
+Reading LBA 352
+LBA 352 read
+----------------
+Reading LBA 368
+LBA 368 read
+----------------
+Reading LBA 384
+LBA 384 read
+----------------
+Reading LBA 400
+LBA 400 read
+----------------
+Reading LBA 416
+LBA 416 read
+----------------
+Reading LBA 432
+LBA 432 read
+----------------
+Reading LBA 448
+LBA 448 read
+----------------
+Reading LBA 464
+LBA 464 read
+----------------
+Reading LBA 480
+LBA 480 read
+----------------
+Reading LBA 496
+LBA 496 read
