@@ -1,0 +1,10 @@
+>>> Stress completed <<<
+-----------------------------------------------------
+WRITES REQUESTED = 60082
+WRITES DONE BY YOUR FTL = 60081
+INTERNAL WRITE_AMPLIFICATION = 3.924302
+TRIMS REQUESTED = 0
+TRIMS DONE BY YOUR FTL = 0
+-----------------------------------------------------
+Score:
+100
