@@ -15,7 +15,11 @@
 #endif
 
 /* Page index for a invalid page in a block*/
-static const uint16_t INVALID_PAGE = 0xFFFF;
+#define INVALID_PAGE 0xFFFF
+/* Throttle threshold, trigger reduction of benefit-cost ratio */
+#define THROTTLE_THRESHOLD_RATIO 0.75
+/* factor used to reduce the benefit-cost ratio */
+#define THROTTLE_REDUCTION_RATIO 0.5
 
 template <typename PageType>
 class MyFTL : public FTLBase<PageType> {
@@ -57,27 +61,27 @@ class MyFTL : public FTLBase<PageType> {
 
     MyAddress() : addr(INVALID_PAGE) {}
 
-    bool IsValid() const {
+    inline bool IsValid() const {
       return addr != INVALID_PAGE;
     }
 
-    uint16_t BlockId() const {
+    inline uint16_t BlockId() const {
       return addr >> page_idx_bit_num_;
     }
 
-    uint16_t PageIdx() const {
+    inline uint16_t PageIdx() const {
       return addr & page_idx_mask_;
     }
 
-    void Set(uint16_t block_id, uint16_t page_idx) {
+    inline void Set(uint16_t block_id, uint16_t page_idx) {
       addr = (block_id << page_idx_bit_num_) | page_idx;
     }
 
-    void Set(uint16_t lba) {
+    inline void Set(uint16_t lba) {
       this->addr = lba;
     }
 
-    void SetInvalid() {
+    inline void SetInvalid() {
       addr = INVALID_PAGE;
     }
   };
@@ -94,6 +98,22 @@ class MyFTL : public FTLBase<PageType> {
       mapped_logical_pages.resize(block_capacity_);
     }
 
+    inline bool HasEmptyPage() {
+      return next_free_page_idx == block_capacity_;
+    }
+
+    inline uint16_t WritePage(uint16_t lba) {
+      mapped_logical_pages[next_free_page_idx].Set(lba);
+      valid_page_count++;
+      ts = current_ts_++;
+      return next_free_page_idx++;
+    }
+
+    inline void PageMoved(uint16_t page_idx) {
+      mapped_logical_pages[page_idx].SetInvalid();
+      valid_page_count--;
+    }
+
     void Erase() {
       next_free_page_idx = 0;
       erase_count--;
@@ -102,6 +122,11 @@ class MyFTL : public FTLBase<PageType> {
       for(auto& addr : mapped_logical_pages) {
         addr.SetInvalid();
       }
+    }
+
+    inline void Trim(uint16_t page_idx) {
+      mapped_logical_pages[page_idx].SetInvalid();
+      valid_page_count--;
     }
   };
 
@@ -122,10 +147,6 @@ class MyFTL : public FTLBase<PageType> {
 
   /* Throttle threshold, trigger reduction of benefit-cost ratio */
   size_t throttle_threshold_;
-  /* factor used to reduce the benefit-cost ratio */
-  double ratio_reduction_factor_;
-  /* The threshold triggerring the migration of cold data in the block */
-  size_t migrate_threshold_;
 
  public:
   /*
@@ -161,11 +182,14 @@ class MyFTL : public FTLBase<PageType> {
 
     current_ts_ = 0;
 
+    throttle_threshold_ = THROTTLE_THRESHOLD_RATIO * max_erases_;
+
     printf("SSD Configuration: %zu, %zu, %zu, %zu, %zu\n", ssd_size_,
            package_size_, die_size_, plane_size_, block_size_);
     printf("Capacity: %zu, %zu, %zu, %zu, %zu\n", ssd_capacity_,
            package_capacity_, die_capacity_, plane_capacity_, block_capacity_);
     printf("Max Erase Count: %zu, Overprovisioning: %zu%%\n", max_erases_, op_);
+    printf("Threshold: %zu\n", throttle_threshold_);
   }
 
   /*
@@ -187,23 +211,24 @@ class MyFTL : public FTLBase<PageType> {
       size_t lba, const ExecCallBack<PageType> &func) {
     (void)func;
 
+    // std::cout << "read: " << lba << std::endl;
     DEBUG_INST(std::cout << "[ReadTranslate] [Entry] read lba: " << lba << std::endl)
-    if(lba > lba_to_physical_page_.size()) {
+    if(!IsValidLBA(lba)) {
       // out of range
       DEBUG_INST(std::cout << "[ReadTranslate] [Error] out of range" << std::endl)
       return std::make_pair(ExecState::FAILURE, Address());
     }
 
-    auto& addr = lba_to_physical_page_[lba];
-    if(!addr.IsValid()) {
+    auto& physical_addr = lba_to_physical_page_[lba];
+    if(!physical_addr.IsValid()) {
       // read from invalid page
       DEBUG_INST(std::cout << "[ReadTranslate] [Error] read from invalid page" << std::endl)
       return std::make_pair(ExecState::FAILURE, Address());
     }
     
     // successful read
-    DEBUG_INST(std::cout << "[ReadTranslate] [Success] read from block: " << addr.BlockId() << ", page: " << addr.PageIdx() << std::endl)
-    return std::make_pair(ExecState::SUCCESS, GetAddress(addr.addr));
+    DEBUG_INST(std::cout << "[ReadTranslate] [Success] read from block: " << physical_addr.BlockId() << ", page: " << physical_addr.PageIdx() << std::endl)
+    return std::make_pair(ExecState::SUCCESS, GetAddress(physical_addr.addr));
   }
 
   /*
@@ -214,16 +239,20 @@ class MyFTL : public FTLBase<PageType> {
   std::pair<ExecState, Address> WriteTranslate(
       size_t lba, const ExecCallBack<PageType> &func) {
     (void)func;
+    // std::cout << "write: " << lba << std::endl;
     DEBUG_INST(std::cout << "[WriteTranslate] [Entry] write lba: " << lba << std::endl)
-    if(lba > lba_to_physical_page_.size()) {
+    if(!IsValidLBA(lba)) {
       // out of range
       DEBUG_INST(std::cout << "[WriteTranslate] [Error] out of range" << std::endl)
       return std::make_pair(ExecState::FAILURE, Address());
     }
 
-    auto& addr = lba_to_physical_page_[lba];
-    if(physical_blocks_[writing_block_id_].next_free_page_idx == block_capacity_) {
-      if(next_init_empty_block_id_ == physical_blocks_.size()) {
+    if(physical_blocks_[writing_block_id_].HasEmptyPage()) {
+      if(HasInitEmptyBlock()) {
+        // choose next initially empty block
+        DEBUG_INST(std::cout << "[WriteTranslate] [Info] choose next initially empty block: " << next_init_empty_block_id_ << std::endl)
+        writing_block_id_ = GetNextInitEmptyBlock();
+      } else {
         // do garbage collection
         DEBUG_INST(std::cout << "[WriteTranslate] [Info] do garbage collection" << std::endl)
         if(!GarbageCollection(func)) {
@@ -231,32 +260,21 @@ class MyFTL : public FTLBase<PageType> {
           DEBUG_INST(std::cout << "[WriteTranslate] [Failed] garbage collection failed" << std::endl)
           return std::make_pair(ExecState::FAILURE, Address());
         }
-      } else {
-        // choose next initially empty block
-        DEBUG_INST(std::cout << "[WriteTranslate] [Info] choose next initially empty block: " << next_init_empty_block_id_ << std::endl)
-        writing_block_id_ = next_init_empty_block_id_++;
-        physical_blocks_[writing_block_id_] = physical_blocks_[writing_block_id_];
       }
     }
 
+    auto& physical_addr = lba_to_physical_page_[lba];
     auto& writing_block = physical_blocks_[writing_block_id_];
     // modify old mapping
-    if(addr.IsValid()) {
-      auto& prev_block = physical_blocks_[addr.BlockId()];
-      prev_block.mapped_logical_pages[addr.PageIdx()].SetInvalid();
-      prev_block.valid_page_count--;
-      DEBUG_INST(std::cout << "[WriteTranslate] [Info] old mapping: block: " << addr.BlockId() << ", page: " << addr.PageIdx() << std::endl)
+    if(physical_addr.IsValid()) {
+      physical_blocks_[physical_addr.BlockId()].PageMoved(physical_addr.PageIdx());
+      DEBUG_INST(std::cout << "[WriteTranslate] [Info] old mapping: block: " << physical_addr.BlockId() << ", page: " << physical_addr.PageIdx() << std::endl)
     }
 
     // map to new physical page
-    addr.Set(writing_block_id_, writing_block.next_free_page_idx);
-    writing_block.mapped_logical_pages[writing_block.next_free_page_idx].Set(lba);
-    writing_block.next_free_page_idx++;
-    writing_block.valid_page_count++;
-    writing_block.ts = current_ts_++;
-
-    DEBUG_INST(std::cout << "[WriteTranslate] [Success] write to block: " << addr.BlockId() << ", page: " << addr.PageIdx() << std::endl)
-    return std::make_pair(ExecState::SUCCESS, GetAddress(addr.addr));
+    physical_addr.Set(writing_block_id_, writing_block.WritePage(lba));
+    DEBUG_INST(std::cout << "[WriteTranslate] [Success] write to block: " << physical_addr.BlockId() << ", page: " << physical_addr.PageIdx() << std::endl)
+    return std::make_pair(ExecState::SUCCESS, GetAddress(physical_addr.addr));
   }
 
   /*
@@ -264,28 +282,39 @@ class MyFTL : public FTLBase<PageType> {
    */
   ExecState Trim(size_t lba, const ExecCallBack<PageType> &func) {
     (void)func;
+    // std::cout << "trim: " << lba << std::endl;
     DEBUG_INST(std::cout << "[Trim] [Entry] trim lba: " << lba << std::endl)
-    if(lba > lba_to_physical_page_.size()) {
+    if(!IsValidLBA(lba)) {
       // out of range
       DEBUG_INST(std::cout << "[Trim] [Error] out of range" << std::endl)
       return ExecState::FAILURE;
     }
 
-    auto& addr = lba_to_physical_page_[lba];
-    if(!addr.IsValid()) {
+    auto& physical_addr = lba_to_physical_page_[lba];
+    if(!physical_addr.IsValid()) {
       // trim invalid page
       DEBUG_INST(std::cout << "[Trim] [Error] trim invalid page" << std::endl)
       return ExecState::FAILURE;
     }
 
-    auto& block = physical_blocks_[addr.BlockId()];
-    block.mapped_logical_pages[addr.PageIdx()].SetInvalid();
-    block.valid_page_count--;
-    DEBUG_INST(std::cout << "[Trim] [Success] trim block: " << addr.BlockId() << ", page: " << addr.PageIdx() << std::endl)
+    physical_blocks_[physical_addr.BlockId()].Trim(physical_addr.PageIdx());
+    DEBUG_INST(std::cout << "[Trim] [Success] trim block: " << physical_addr.BlockId() << ", page: " << physical_addr.PageIdx() << std::endl)
     return ExecState::SUCCESS;
   }
 
  private:
+  inline bool IsValidLBA(size_t lba) {
+    return lba < lba_to_physical_page_.size();
+  }
+
+  inline bool HasInitEmptyBlock() {
+    return next_init_empty_block_id_ < physical_blocks_.size();
+  }
+
+  inline uint16_t GetNextInitEmptyBlock() {
+    return next_init_empty_block_id_++;
+  }
+
   Address GetAddress(size_t lba) {
     auto package = lba / package_capacity_;
     lba %= package_capacity_;
@@ -298,66 +327,72 @@ class MyFTL : public FTLBase<PageType> {
     return Address(package, die, plane, block, page);
   }
 
-  bool GarbageCollection(const ExecCallBack<PageType> &func) {
-    DEBUG_INST(std::cout << "[GarbageCollection] [Entry] cleaning block: " << cleaning_block_id_ << ", writing block: " << writing_block_id_ << std::endl)
-    auto& cleaning_block = physical_blocks_[cleaning_block_id_];
+  uint16_t PickVictimBlock() {
     double max_benefit_cost_ratio = -1;
-    size_t gc_block_id = physical_blocks_.size();
-    for(uint16_t i = 0; i < physical_blocks_.size(); i++) {
+    size_t victim_block_id = physical_blocks_.size();
+    for(size_t i = 0; i < physical_blocks_.size(); i++) {
       if(i == cleaning_block_id_) {
         continue;
       }
       auto& block = physical_blocks_[i];
       if(block.erase_count == 0) {
-        // block can not be erased
         continue;
       }
-      double utilization = block.valid_page_count / block_capacity_;
+      double utilization = block.valid_page_count / (double)block_capacity_;
       double benefit_cost_ratio = (1 - utilization) / (1 + utilization) * (current_ts_ - block.ts);
-      if(block.erase_count < throttle_threshold_) {
-        benefit_cost_ratio *= ratio_reduction_factor_;
-      }
+      double ratio_adjustment = block.erase_count / (double)max_erases_;
+      // std::cout << "ratio_adjustment: " << ratio_adjustment << std::endl;
+      benefit_cost_ratio *= ratio_adjustment;
+      // if(block.erase_count < throttle_threshold_) {
+      //   benefit_cost_ratio *= THROTTLE_REDUCTION_RATIO;
+      // }
       if(benefit_cost_ratio > max_benefit_cost_ratio) {
         max_benefit_cost_ratio = benefit_cost_ratio;
-        gc_block_id = i;
-      } else if(benefit_cost_ratio == max_benefit_cost_ratio) {
-        if(block.valid_page_count < physical_blocks_[gc_block_id].valid_page_count) {
-          gc_block_id = i;
-        }
+        victim_block_id = i;
+      } else if(benefit_cost_ratio == max_benefit_cost_ratio && block.valid_page_count < physical_blocks_[victim_block_id].valid_page_count) {
+        victim_block_id = i;
       }
     }
-    if(gc_block_id == physical_blocks_.size()) {
-      // no block can be erased
-      DEBUG_INST(std::cout << "[GarbageCollection] [Failed] no block can be erased(all worn out)" << std::endl)
-      return false;
+    if(victim_block_id != physical_blocks_.size() && physical_blocks_[victim_block_id].valid_page_count == block_capacity_) {
+      // std::cout << "victim block: " << victim_block_id << ", erase count: " << physical_blocks_[victim_block_id].erase_count << ", valid page count: " << physical_blocks_[victim_block_id].valid_page_count << std::endl;
+      // useless victim block
+      return physical_blocks_.size();
     }
-    if(max_benefit_cost_ratio == 0 && physical_blocks_[gc_block_id].valid_page_count == block_capacity_) {
+    return victim_block_id;
+  }
+
+  void CleanBlock(uint16_t block_id, const ExecCallBack<PageType> &func) {
+    auto& cleaning_block = physical_blocks_[cleaning_block_id_];
+    auto& block = physical_blocks_[block_id];
+    for(size_t i = 0; i < block.mapped_logical_pages.size(); i++) {
+      auto& logical_addr = block.mapped_logical_pages[i];
+      if(logical_addr.IsValid()) {
+        func(OpCode::READ, GetAddress(block_id * block_capacity_ + i));
+        auto new_physical_page_idx = cleaning_block.WritePage(logical_addr.addr);
+        func(OpCode::WRITE, GetAddress(cleaning_block_id_ * block_capacity_ + new_physical_page_idx));
+        lba_to_physical_page_[logical_addr.addr].Set(cleaning_block_id_, new_physical_page_idx);
+      }
+    }
+    func(OpCode::ERASE, GetAddress(block_id * block_capacity_));
+    block.Erase();
+  }
+
+  bool GarbageCollection(const ExecCallBack<PageType> &func) {
+    DEBUG_INST(std::cout << "[GarbageCollection] [Entry] cleaning block: " << cleaning_block_id_ << ", writing block: " << writing_block_id_ << std::endl)
+    auto victim_block_id = PickVictimBlock();
+    if(victim_block_id == physical_blocks_.size()) {
       // no block can be erased
       DEBUG_INST(std::cout << "[GarbageCollection] [Failed] no block can be erased" << std::endl)
+      // for(int i = 0; i != physical_blocks_.size(); i++) {
+      //   std::cout << "block: " << i << ", erase count: " << physical_blocks_[i].erase_count << ", valid page count: " << physical_blocks_[i].valid_page_count << std::endl;
+      // }
       return false;
     }
 
-    DEBUG_INST(std::cout << "[GarbageCollection] [Info] gc block: " << gc_block_id << std::endl)
-    // move data from gc block to cleaning block
-    auto& gc_block = physical_blocks_[gc_block_id];
-    for(size_t i = 0; i < gc_block.mapped_logical_pages.size(); i++) {
-      auto& addr = gc_block.mapped_logical_pages[i];
-      if(addr.IsValid()) {
-        func(OpCode::READ, GetAddress(gc_block_id * block_capacity_ + i));
-        func(OpCode::WRITE, GetAddress(cleaning_block_id_ * block_capacity_ + cleaning_block.next_free_page_idx));
-        lba_to_physical_page_[addr.addr].Set(cleaning_block_id_, cleaning_block.next_free_page_idx);
-        cleaning_block.mapped_logical_pages[cleaning_block.next_free_page_idx] = addr;
-        cleaning_block.next_free_page_idx++;
-        cleaning_block.valid_page_count++;
-        cleaning_block.ts = current_ts_++;
-        // DEBUG_INST(std::cout << "[GarbageCollection] [Info] move data: lba: " << addr.addr << " from block: " << gc_block_id << ", page: " << i <<
-        // " -> block: " << cleaning_block_id_ << ", page: " << cleaning_block.next_free_page_idx - 1 << std::endl)
-      }
-    }
-    func(OpCode::ERASE, GetAddress(gc_block_id * block_capacity_));
-    gc_block.Erase();
+    DEBUG_INST(std::cout << "[GarbageCollection] [Info] victim block: " << victim_block_id << std::endl)
+    CleanBlock(victim_block_id, func);
     writing_block_id_ = cleaning_block_id_;
-    cleaning_block_id_ = gc_block_id;
+    cleaning_block_id_ = victim_block_id;
     DEBUG_INST(std::cout << "[GarbageCollection] [Success] cleaning block: " << cleaning_block_id_ << ", writing block: " << writing_block_id_ << std::endl)
     return true;
   }
