@@ -652,10 +652,10 @@ class MyFTL : public FTLBase<PageType> {
    * @return victim block id
    */
   uint16_t pick_victim_block() {
-    double max_benefit_cost_ratio = -1; // max benefit-cost ratio
+    double max_cost_benefit_ratio = -1; // max cost-benefit ratio
     uint16_t victim_block_id = physical_blocks_.size(); // victim block id
 
-    // traverse all blocks to find the victim block
+    // traverse all blocks to find the block with max cost-benefit ratio
     for(size_t i = 0; i < physical_blocks_.size(); i++) {
       if(i == cleaning_block_id_) {
         // skip the cleaning block
@@ -667,23 +667,23 @@ class MyFTL : public FTLBase<PageType> {
         continue;
       }
 
-      // calculate the benefit-cost ratio
+      // calculate the cost-benefit ratio
       double utilization = block.valid_page_count_ / (double)block_capacity_;
-      double benefit_cost_ratio = (1 - utilization) / (1 + utilization)
+      double cost_benefit_ratio = (1 - utilization) / (1 + utilization)
         * (current_ts_ - block.ts_);
-      double ration_adjustment = block.erases_ / (double)block_erases_;
 
       // adjust the ratio based on remaining erases
-      benefit_cost_ratio *= ration_adjustment; 
+      double ration_adjustment = block.erases_ / (double)block_erases_;
+      cost_benefit_ratio *= ration_adjustment; 
 
-      // update the max benefit-cost ratio and victim block id
-      if(benefit_cost_ratio > max_benefit_cost_ratio) {
-        max_benefit_cost_ratio = benefit_cost_ratio;
+      // update the max cost-benefit ratio and victim block id
+      if(cost_benefit_ratio > max_cost_benefit_ratio) {
+        max_cost_benefit_ratio = cost_benefit_ratio;
         victim_block_id = i;
-      } else if(benefit_cost_ratio == max_benefit_cost_ratio
+      } else if(cost_benefit_ratio == max_cost_benefit_ratio
           && block.valid_page_count_ 
             < physical_blocks_[victim_block_id].valid_page_count_) {
-        // we prefer the block with less valid pages if the benefit-cost
+        // we prefer the block with less valid pages if the cost-benefit
         // ratio is the same
         victim_block_id = i;
       }
