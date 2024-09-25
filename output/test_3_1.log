@@ -1,8 +1,8 @@
 >>> Stress completed <<<
 -----------------------------------------------------
-WRITES REQUESTED = 62470
-WRITES DONE BY YOUR FTL = 62469
-INTERNAL WRITE_AMPLIFICATION = 3.865469
+WRITES REQUESTED = 62460
+WRITES DONE BY YOUR FTL = 62459
+INTERNAL WRITE_AMPLIFICATION = 3.879649
 TRIMS REQUESTED = 0
 TRIMS DONE BY YOUR FTL = 0
 -----------------------------------------------------

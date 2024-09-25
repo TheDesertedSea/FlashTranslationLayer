@@ -1,8 +1,22 @@
+/**
+ * @file myFTL.cpp
+ * @brief This file contains the implementation of MyFTL class.
+ *
+ * Implement following functions:
+ * - ReadTranslate: Translates lbas to physical addresses for read operations
+ * - WriteTranslate: Translates lbas to physical addresses for
+ *                     write operations
+ * - Trim: Trims a lba
+ * 
+ * Key Features:
+ * Used a page-to-page mapping scheme.
+ * Used a Cost-Benefit-Ratio based garbage collection policy.
+ * Used cold data migration to improve wear leveling.
+ * Used an implicit LRU list for quickly finding cold blocks.
+ *
+ * @author Cundao Yu <cundaoy@andrew.cmu.edu>
+ */
 #include "myFTL.h"
-
-#include <memory>
-
-#include <bitset>
 
 #include "common.h"
 
@@ -14,148 +28,305 @@
 #define DEBUG_INST(inst) ;
 #endif
 
-/* Page index for a invalid page in a block*/
+/** Invalid page address */
 #define INVALID_PAGE 0xFFFF
-/* Throttle threshold, trigger reduction of benefit-cost ratio */
-#define THROTTLE_THRESHOLD_RATIO 0.75
-/* factor used to reduce the benefit-cost ratio */
-#define THROTTLE_REDUCTION_RATIO 0.5
 
+/** 
+ * Cold Data Migration threshold ratio
+ *
+ * Max erases * this ratio is the threshold for cold data migration
+ */
+#define MIGRATE_THRESHOLD_RATIO 0.2
+
+/** Cold Data threshold
+ *
+ * block with age larger than this threshold will be considered as cold block
+ */
+#define COLD_DATA_THRESHOLD 100000
+
+/** Minimum size proportion of cold block for migration
+ *
+ * if the valid page count of a cold block is less than this proportion,
+ * it will not be considered for migration 
+ */
+#define MIN_SIZE_PROPORTION_MIGRATION 0.9375
+
+/**
+ * class MyFTL - MyFTL implementation
+ *
+ * Implements ReadTranslate, WriteTranslate and Trim functions
+ */
 template <typename PageType>
 class MyFTL : public FTLBase<PageType> {
 
-  /* Compact format of page address */
+  /**
+   * struct MyAddress - Compact format of page address
+   * 
+   * Represents a physical page address in a compact format.
+   */
   struct MyAddress {
-    uint16_t addr;
+    /** Raw address */
+    uint16_t addr_;
 
-    MyAddress() : addr(INVALID_PAGE) {}
+    /**
+     * Constructor
+     */
+    MyAddress() : addr_(INVALID_PAGE) {}
 
-    inline bool IsValid() const {
-      return addr != INVALID_PAGE;
+    /**
+     * Check if the address is valid
+     *
+     * @return true if the address is valid
+     */
+    inline bool is_valid() const {
+      return addr_ != INVALID_PAGE;
     }
 
-    inline uint16_t BlockId() const {
-      return addr >> page_idx_bit_num_;
+    /**
+     * Get block id
+     *
+     * @return block id
+     */
+    inline uint16_t get_block_id() const {
+      return addr_ >> page_idx_bit_num_;
     }
 
-    inline uint16_t PageIdx() const {
-      return addr & page_idx_mask_;
+    /**
+     * Get page index
+     *
+     * @return page index
+     */
+    inline uint16_t get_page_idx() const {
+      return addr_ & page_idx_mask_;
     }
 
-    inline void Set(uint16_t block_id, uint16_t page_idx) {
-      addr = (block_id << page_idx_bit_num_) | page_idx;
+    /**
+     * Set block id and page index
+     *
+     * @param block_id block id
+     * @param page_idx page index
+     */
+    inline void set(uint16_t block_id, uint16_t page_idx) {
+      addr_ = (block_id << page_idx_bit_num_) | page_idx;
     }
 
-    inline void Set(uint16_t lba) {
-      this->addr = lba;
+    /**
+     * Set block id
+     *
+     * @param block_id block id
+     */
+    inline void set(uint16_t lba) {
+      addr_ = lba;
     }
 
-    inline void SetInvalid() {
-      addr = INVALID_PAGE;
+    /**
+     * Set invalid
+     */
+    inline void set_invalid() {
+      addr_ = INVALID_PAGE;
     }
   };
 
-  /* Physical block state */
+  /**
+   * struct PhysicalBlock - Physical block
+   *
+   * Contains internal information of a physical block.
+   */
   struct PhysicalBlock {
-    std::vector<MyAddress> mapped_logical_pages;
-    uint8_t next_free_page_idx;
-    uint8_t erase_count;
-    uint16_t valid_page_count;
-    int16_t lru_prev_block_id; // -1: null, >=0: valid
-    int16_t lru_next_block_id; // -1: null, >=0: valid
-    size_t ts;
+    /**
+     * Mapped logical pages
+     * 
+     * Indicates which logical page is mapped to for each physical page
+     * in the block. If the MyAddress object is invalid, means the
+     * corresponding physical page is empty or stores outdated data.
+     */
+    std::vector<MyAddress> mapped_logical_pages_;
 
-    PhysicalBlock() : next_free_page_idx(0), erase_count(max_erases_), valid_page_count(0), ts(0) {
-      mapped_logical_pages.resize(block_capacity_);
+    /**
+     * Next empty page index
+     *
+     * Start from 0, increase by 1 when a page is written.
+     * Empty means the page is not written yet.
+     */
+    uint8_t next_empty_page_idx_;
+
+    /**
+     * Remaining erases
+     */
+    uint8_t erases_;
+
+    /**
+     * Valid page count
+     */
+    uint16_t valid_page_count_;
+
+    /**
+     * Prev pointer in a implicit LRU list
+     *
+     * -1: null, >=0: prev block id
+     */
+    int16_t lru_prev_block_id_;
+
+    /**
+     * Next pointer in a implicit LRU list
+     *
+     * -1: null, >=0: next block id
+     */
+    int16_t lru_next_block_id_;
+
+    /**
+     * Timestamp
+     */
+    size_t ts_;
+
+    /**
+     * Constructor
+     */
+    PhysicalBlock() : next_empty_page_idx_(0), erases_(block_erases_)
+      , valid_page_count_(0), ts_(0) {
+      mapped_logical_pages_.resize(block_capacity_);
     }
 
-    inline bool HasEmptyPage() {
-      return next_free_page_idx == block_capacity_;
+    /**
+     * Check if the block has empty page
+     *
+     * @return true if the block has empty page
+     */
+    inline bool has_empty_page() {
+      return next_empty_page_idx_ == block_capacity_;
     }
 
-    inline uint16_t WritePage(uint16_t lba) {
-      mapped_logical_pages[next_free_page_idx].Set(lba);
-      valid_page_count++;
-      ts = current_ts_++;
-      return next_free_page_idx++;
+    /**
+     * Change related internal states and return the page index for writing on
+     *
+     * @param lba lba
+     * @return page index for writing on
+     */
+    inline uint16_t write_page(uint16_t lba) {
+      mapped_logical_pages_[next_empty_page_idx_].set(lba);
+      valid_page_count_++;
+      ts_ = current_ts_++;
+      return next_empty_page_idx_++;
     }
 
-    inline void PageMoved(uint16_t page_idx) {
-      mapped_logical_pages[page_idx].SetInvalid();
-      valid_page_count--;
+    /**
+     * Change related internal states when a page is moved 
+     * 
+     * @param page_idx page index
+     */
+    inline void page_moved(uint16_t page_idx) {
+      mapped_logical_pages_[page_idx].set_invalid();
+      valid_page_count_--;
     }
 
-    inline bool IsWornOut() {
-      return erase_count == 0;
+    /**
+     * Check if the block is worn out
+     *
+     * @return true if the block is worn out
+     */
+    inline bool is_worn_out() {
+      return erases_ == 0;
     }
 
-    void Erase() {
-      next_free_page_idx = 0;
-      erase_count--;
-      valid_page_count = 0;
-      ts = current_ts_;
-      for(auto& addr : mapped_logical_pages) {
-        addr.SetInvalid();
+    /**
+     * Check if the block is cold
+     *
+     * @return true if the block is cold
+     */
+    inline bool is_cold() {
+      return current_ts_ - ts_ > COLD_DATA_THRESHOLD;
+    }
+
+    /**
+     * Reset related internal states when the block is erased
+     */
+    void erase() {
+      next_empty_page_idx_ = 0;
+      erases_--;
+      valid_page_count_ = 0;
+      ts_ = current_ts_;
+      for(auto& addr : mapped_logical_pages_) {
+        addr.set_invalid();
       }
     }
 
-    inline void Trim(uint16_t page_idx) {
-      mapped_logical_pages[page_idx].SetInvalid();
-      valid_page_count--;
+    /**
+     * Change related internal states when a page is trimmed
+     *
+     * @param page_idx page index
+     */
+    inline void trim(uint16_t page_idx) {
+      mapped_logical_pages_[page_idx].set_invalid();
+      valid_page_count_--;
     }
   };
 
-  /* Number of packages in a ssd */
+  /** Number of packages in a ssd */
   size_t ssd_size_;
-  /* Number of dies in a package_ */
+  /** Number of dies in a package_ */
   size_t package_size_;
-  /* Number of planes in a die_ */
+  /** Number of planes in a die_ */
   size_t die_size_;
-  /* Number of blocks in a plane_ */
+  /** Number of blocks in a plane_ */
   size_t plane_size_;
-  /* Number of pages in a block_ */
+  /** Number of pages in a block_ */
   size_t block_size_;
-  /* Overprovioned blocks as a percentage of total number of blocks */
+  /** Overprovioned blocks as a percentage of total number of blocks */
   size_t op_;
-  /* max erases */
-  static size_t max_erases_;
+  /** Initial block erases */
+  static size_t block_erases_;
 
-  /* Number of pages in a block */
+  /** Number of pages in a block */
   static size_t block_capacity_;
-  /* Number of pages in a plane */
+  /** Number of pages in a plane */
   size_t plane_capacity_;
-  /* Number of pages in a die */
+  /** Number of pages in a die */
   size_t die_capacity_;
-  /* Number of pages in a package */
+  /** Number of pages in a package */
   size_t package_capacity_;
-  /* Number of pages in a ssd */
+  /** Number of pages in a ssd */
   size_t ssd_capacity_;
 
-  /* number of bits used to represent page index */
+  /** Number of bits used to represent page index */
   static size_t page_idx_bit_num_;
-  /* mask to get page index */
+  /** Mask to get page index */
   static uint16_t page_idx_mask_;
 
-  /* lba to physical page mapping */
+  /** 
+   * Lba to physical page address mapping
+   *
+   * If the address is invalid, means this lba is not written yet
+   */
   std::vector<MyAddress> lba_to_physical_page_;
-  /* physical blocks */
+  /** Physical blocks */
   std::vector<PhysicalBlock> physical_blocks_;
 
-  /* current block used for writing */
+  /** Current block used for writing */
   uint16_t writing_block_id_;
-  /* reserved block for cleaning */
+  /** 
+   * Reserved block for cleaning. 
+   *
+   * Data in cleaned block will be moved to this block,
+   * and then the cleaning block will be the new writing block
+   */
   uint16_t cleaning_block_id_;
-  /* next free block */
+  /** 
+   * Next initially empty block id. 
+   * 
+   * After all initially empty blocks are used,
+   * we need to do garbage collection to get a new empty block 
+   */
   uint16_t next_init_empty_block_id_;
 
+  /** Implicit LRU list head, which is the most recently used block */
   int16_t lrulist_head_;
+  /** Implicit LRU list tail, which is the least recently used block */
   int16_t lrulist_tail_;
 
-  /* current ts */
+  /** Current timestamp */
   static size_t current_ts_;
 
-  /* Throttle threshold, trigger reduction of benefit-cost ratio */
-  // std::vector<size_t> migrate_thresholds_;
+  /** Threshold for cold data migration */
   size_t migrate_threshold_;
 
  public:
@@ -169,7 +340,7 @@ class MyFTL : public FTLBase<PageType> {
     plane_size_ = conf->GetPlaneSize();
     block_size_ = conf->GetBlockSize();
     op_ = conf->GetOverprovisioning();
-    max_erases_ = conf->GetBlockEraseCount();
+    block_erases_ = conf->GetBlockEraseCount();
 
     block_capacity_ = block_size_;
     plane_capacity_ = block_capacity_ * plane_size_;
@@ -177,40 +348,49 @@ class MyFTL : public FTLBase<PageType> {
     package_capacity_ = die_capacity_ * package_size_;
     ssd_capacity_ = package_capacity_ * ssd_size_;
 
+    /* Calculate page index bit number and mask */
     page_idx_bit_num_ = 0;
     while(((size_t)1 << page_idx_bit_num_) < block_size_) {
       page_idx_bit_num_++;
     }
     page_idx_mask_ = (1 << page_idx_bit_num_) - 1;
 
+    /* Initialize lba to physical page mapping, lba space is calculated based
+     on ssd capacity and overprovisioning */
     lba_to_physical_page_.resize(ssd_capacity_ * ((double)(100 - op_) / 100));
+
+    /* Initialize physical blocks */
     physical_blocks_.resize(ssd_capacity_ / block_capacity_);
 
-    physical_blocks_[0].lru_prev_block_id = -1;
-    physical_blocks_[0].lru_next_block_id = 1;
+    /* Initialize implicit LRU list */
+    physical_blocks_[0].lru_prev_block_id_ = -1;
+    physical_blocks_[0].lru_next_block_id_ = 1;
     for(size_t i = 1; i < physical_blocks_.size() - 1; i++) {
-      physical_blocks_[i].lru_prev_block_id = i - 1;
-      physical_blocks_[i].lru_next_block_id = i + 1;
+      physical_blocks_[i].lru_prev_block_id_ = i - 1;
+      physical_blocks_[i].lru_next_block_id_ = i + 1;
     }
-    physical_blocks_[physical_blocks_.size() - 1].lru_prev_block_id = physical_blocks_.size() - 2;
-    physical_blocks_[physical_blocks_.size() - 1].lru_next_block_id = -1;
+    physical_blocks_[physical_blocks_.size() - 1].lru_prev_block_id_
+      = physical_blocks_.size() - 2;
+    physical_blocks_[physical_blocks_.size() - 1].lru_next_block_id_ = -1;
+    lrulist_head_ = 0;
+    lrulist_tail_ = physical_blocks_.size() - 1;
 
     writing_block_id_ = 1;
     cleaning_block_id_ = 0;
     next_init_empty_block_id_ = 2;
 
-    lrulist_head_ = 0;
-    lrulist_tail_ = physical_blocks_.size() - 1;
-
     current_ts_ = 0;
 
-    migrate_threshold_ = (size_t)(0.2 * max_erases_);
+    /* Calculate threshold for cold data migration */
+    migrate_threshold_ = (size_t)(block_erases_ * MIGRATE_THRESHOLD_RATIO);
 
     printf("SSD Configuration: %zu, %zu, %zu, %zu, %zu\n", ssd_size_,
            package_size_, die_size_, plane_size_, block_size_);
     printf("Capacity: %zu, %zu, %zu, %zu, %zu\n", ssd_capacity_,
-           package_capacity_, die_capacity_, plane_capacity_, block_capacity_);
-    printf("Max Erase Count: %zu, Overprovisioning: %zu%%\n", max_erases_, op_);
+           package_capacity_, die_capacity_, plane_capacity_
+           , block_capacity_);
+    printf("Max Erase Count: %zu, Overprovisioning: %zu%%\n", block_erases_
+      , op_);
   }
 
   /*
@@ -232,24 +412,29 @@ class MyFTL : public FTLBase<PageType> {
       size_t lba, const ExecCallBack<PageType> &func) {
     (void)func;
 
-    // std::cout << "read: " << lba << std::endl;
-    DEBUG_INST(std::cout << "[ReadTranslate] [Entry] read lba: " << lba << std::endl)
-    if(!IsValidLBA(lba)) {
-      // out of range
-      DEBUG_INST(std::cout << "[ReadTranslate] [Error] out of range" << std::endl)
+    DEBUG_INST(std::cout << "[ReadTranslate] [Entry] read lba: " << lba
+      << std::endl)
+    if(!is_valid_lba(lba)) {
+      // out of user lba space
+      DEBUG_INST(std::cout << "[ReadTranslate] [Error] out of user lba space"
+        << std::endl)
       return std::make_pair(ExecState::FAILURE, Address());
     }
 
-    auto& physical_addr = lba_to_physical_page_[lba];
-    if(!physical_addr.IsValid()) {
-      // read from invalid page
-      DEBUG_INST(std::cout << "[ReadTranslate] [Error] read from invalid page" << std::endl)
+    auto& physical_addr = lba_to_physical_page_[lba]; // get physical address
+    if(!physical_addr.is_valid()) {
+      // try to read from invalid page
+      DEBUG_INST(std::cout << "[ReadTranslate] [Error] read from invalid page"
+        << std::endl)
       return std::make_pair(ExecState::FAILURE, Address());
     }
     
     // successful read
-    DEBUG_INST(std::cout << "[ReadTranslate] [Success] read from block: " << physical_addr.BlockId() << ", page: " << physical_addr.PageIdx() << std::endl)
-    return std::make_pair(ExecState::SUCCESS, GetAddress(physical_addr.addr));
+    DEBUG_INST(std::cout << "[ReadTranslate] [Success] read from block: "
+      << physical_addr.get_block_id() << ", page: "
+      << physical_addr.get_page_idx() << std::endl)
+    return std::make_pair(ExecState::SUCCESS, get_address(
+      physical_addr.addr_));
   }
 
   /*
@@ -260,25 +445,32 @@ class MyFTL : public FTLBase<PageType> {
   std::pair<ExecState, Address> WriteTranslate(
       size_t lba, const ExecCallBack<PageType> &func) {
     (void)func;
-    // std::cout << "write: " << lba << std::endl;
-    DEBUG_INST(std::cout << "[WriteTranslate] [Entry] write lba: " << lba << std::endl)
-    if(!IsValidLBA(lba)) {
-      // out of range
-      DEBUG_INST(std::cout << "[WriteTranslate] [Error] out of range" << std::endl)
+
+    DEBUG_INST(std::cout << "[WriteTranslate] [Entry] write lba: " << lba
+      << std::endl)
+    if(!is_valid_lba(lba)) {
+      // out of user lba space
+      DEBUG_INST(std::cout
+        << "[WriteTranslate] [Error] out of user lba space" << std::endl)
       return std::make_pair(ExecState::FAILURE, Address());
     }
 
-    if(physical_blocks_[writing_block_id_].HasEmptyPage()) {
-      if(HasInitEmptyBlock()) {
+    if(physical_blocks_[writing_block_id_].has_empty_page()) {
+      if(has_init_empty_block()) {
         // choose next initially empty block
-        DEBUG_INST(std::cout << "[WriteTranslate] [Info] choose next initially empty block: " << next_init_empty_block_id_ << std::endl)
-        writing_block_id_ = GetNextInitEmptyBlock();
+        DEBUG_INST(std::cout
+          << "[WriteTranslate] [Info] choose next initially empty block: "
+          << next_init_empty_block_id_ << std::endl)
+        writing_block_id_ = get_next_init_empty_block();
       } else {
         // do garbage collection
-        DEBUG_INST(std::cout << "[WriteTranslate] [Info] do garbage collection" << std::endl)
-        if(!GarbageCollection(func)) {
+        DEBUG_INST(std::cout
+          << "[WriteTranslate] [Info] do garbage collection" << std::endl)
+        if(!garbage_collect(func)) {
           // garbage collection failed
-          DEBUG_INST(std::cout << "[WriteTranslate] [Failed] garbage collection failed" << std::endl)
+          DEBUG_INST(std::cout
+            << "[WriteTranslate] [Failed] garbage collection failed"
+            << std::endl)
           return std::make_pair(ExecState::FAILURE, Address());
         }
       }
@@ -286,17 +478,23 @@ class MyFTL : public FTLBase<PageType> {
 
     auto& physical_addr = lba_to_physical_page_[lba];
     auto& writing_block = physical_blocks_[writing_block_id_];
-    // modify old mapping
-    if(physical_addr.IsValid()) {
-      physical_blocks_[physical_addr.BlockId()].PageMoved(physical_addr.PageIdx());
-      DEBUG_INST(std::cout << "[WriteTranslate] [Info] old mapping: block: " << physical_addr.BlockId() << ", page: " << physical_addr.PageIdx() << std::endl)
+    if(physical_addr.is_valid()) {
+      // modify old mapping
+      physical_blocks_[physical_addr.get_block_id()].page_moved(
+        physical_addr.get_page_idx());
+      DEBUG_INST(std::cout << "[WriteTranslate] [Info] old mapping: block: "
+        << physical_addr.get_block_id() << ", page: "
+        << physical_addr.get_page_idx() << std::endl)
     }
 
     // map to new physical page
-    physical_addr.Set(writing_block_id_, writing_block.WritePage(lba));
-    UpdateLRU(writing_block_id_);
-    DEBUG_INST(std::cout << "[WriteTranslate] [Success] write to block: " << physical_addr.BlockId() << ", page: " << physical_addr.PageIdx() << std::endl)
-    return std::make_pair(ExecState::SUCCESS, GetAddress(physical_addr.addr));
+    physical_addr.set(writing_block_id_, writing_block.write_page(lba));
+    update_lru(writing_block_id_); // update LRU list
+    DEBUG_INST(std::cout << "[WriteTranslate] [Success] write to block: "
+      << physical_addr.get_block_id() << ", page: "
+      << physical_addr.get_page_idx() << std::endl)
+    return std::make_pair(ExecState::SUCCESS, get_address(
+      physical_addr.addr_));
   }
 
   /*
@@ -304,41 +502,68 @@ class MyFTL : public FTLBase<PageType> {
    */
   ExecState Trim(size_t lba, const ExecCallBack<PageType> &func) {
     (void)func;
-    // std::cout << "trim: " << lba << std::endl;
+
     DEBUG_INST(std::cout << "[Trim] [Entry] trim lba: " << lba << std::endl)
-    if(!IsValidLBA(lba)) {
-      // out of range
-      DEBUG_INST(std::cout << "[Trim] [Error] out of range" << std::endl)
+    if(!is_valid_lba(lba)) {
+      // out of user lba space
+      DEBUG_INST(std::cout << "[Trim] [Error] out of user lba space"
+        << std::endl)
       return ExecState::FAILURE;
     }
 
     auto& physical_addr = lba_to_physical_page_[lba];
-    if(!physical_addr.IsValid()) {
-      // trim invalid page
+    if(!physical_addr.is_valid()) {
+      // try to trim invalid page
       DEBUG_INST(std::cout << "[Trim] [Error] trim invalid page" << std::endl)
       return ExecState::FAILURE;
     }
 
-    physical_blocks_[physical_addr.BlockId()].Trim(physical_addr.PageIdx());
-    physical_addr.SetInvalid();
-    DEBUG_INST(std::cout << "[Trim] [Success] trim block: " << physical_addr.BlockId() << ", page: " << physical_addr.PageIdx() << std::endl)
+    // trim the page
+    physical_blocks_[physical_addr.get_block_id()].trim(
+      physical_addr.get_page_idx());
+    physical_addr.set_invalid();
+    DEBUG_INST(std::cout << "[Trim] [Success] trim block: "
+      << physical_addr.get_block_id() << ", page: "
+      << physical_addr.get_page_idx() << std::endl)
     return ExecState::SUCCESS;
   }
 
  private:
-  inline bool IsValidLBA(size_t lba) {
+  /**
+   * Check if the lba is valid
+   *
+   * @param lba lba
+   * @return true if the lba is valid
+   */
+  inline bool is_valid_lba(size_t lba) {
     return lba < lba_to_physical_page_.size();
   }
 
-  inline bool HasInitEmptyBlock() {
+  /**
+   * Check if there is initially empty block
+   *
+   * @return true if there is initially empty block
+   */
+  inline bool has_init_empty_block() {
     return next_init_empty_block_id_ < physical_blocks_.size();
   }
 
-  inline uint16_t GetNextInitEmptyBlock() {
+  /**
+   * Get next initially empty block id
+   *
+   * @return next initially empty block id
+   */
+  inline uint16_t get_next_init_empty_block() {
     return next_init_empty_block_id_++;
   }
 
-  void UpdateLRU(uint16_t block_id) {
+  /**
+   * Update LRU list
+   *
+   * Move the block to the head of the LRU list
+   * @param block_id block id
+   */
+  void update_lru(uint16_t block_id) {
     if(lrulist_head_ == block_id) {
       // already at head
       return;
@@ -346,23 +571,29 @@ class MyFTL : public FTLBase<PageType> {
 
     auto& block = physical_blocks_[block_id];
     if(lrulist_tail_ == block_id) {
-      auto& prev_block = physical_blocks_[block.lru_prev_block_id];
-      prev_block.lru_next_block_id = -1;
-      lrulist_tail_ = block.lru_prev_block_id;
+      auto& prev_block = physical_blocks_[block.lru_prev_block_id_];
+      prev_block.lru_next_block_id_ = -1;
+      lrulist_tail_ = block.lru_prev_block_id_;
     } else {
-      auto& prev_block = physical_blocks_[block.lru_prev_block_id];
-      auto& next_block = physical_blocks_[block.lru_next_block_id];
-      prev_block.lru_next_block_id = block.lru_next_block_id;
-      next_block.lru_prev_block_id = block.lru_prev_block_id;
+      auto& prev_block = physical_blocks_[block.lru_prev_block_id_];
+      auto& next_block = physical_blocks_[block.lru_next_block_id_];
+      prev_block.lru_next_block_id_ = block.lru_next_block_id_;
+      next_block.lru_prev_block_id_ = block.lru_prev_block_id_;
     }
 
-    block.lru_prev_block_id = -1;
-    block.lru_next_block_id = lrulist_head_;
-    physical_blocks_[lrulist_head_].lru_prev_block_id = block_id;
+    block.lru_prev_block_id_ = -1;
+    block.lru_next_block_id_ = lrulist_head_;
+    physical_blocks_[lrulist_head_].lru_prev_block_id_ = block_id;
     lrulist_head_ = block_id;
   }
 
-  Address GetAddress(size_t lba) {
+  /**
+   * Get an Address object representing a lba
+   *
+   * @param lba lba
+   * @return Address object
+   */
+  Address get_address(size_t lba) {
     auto package = lba / package_capacity_;
     lba %= package_capacity_;
     auto die = lba / die_capacity_;
@@ -374,114 +605,212 @@ class MyFTL : public FTLBase<PageType> {
     return Address(package, die, plane, block, page);
   }
 
-  inline int16_t PickColdBlock(uint16_t block_id) {
-    // std::cout << current_ts_ - physical_blocks_[lrulist_tail_].ts << std::endl;
-    if(current_ts_ - physical_blocks_[lrulist_tail_].ts < 100000) {
-      return -1;
-    }
+  /**
+   * Find the least recently used cold block
+   *
+   * Find a suitable cold block for a block.
+   * The data in the cold block will be migrated to the block.
+   * @param block_id block id
+   * @return cold block id
+   */
+  inline int16_t find_cold_block(uint16_t block_id) {
+    // search from the tail of the LRU list
     auto cold_block_id = lrulist_tail_;
+    
+    /* A suitable cold block must satisfy the following conditions:
+     * 1. not the block itself
+     * 2. not worn out
+     * 3. valid page count is larger than a proportion of the block capacity
+     * 4. erase count is larger than the block's erase count
+     */
     while(cold_block_id == block_id 
-      || physical_blocks_[cold_block_id].IsWornOut() 
-      || physical_blocks_[cold_block_id].valid_page_count < 15 * block_capacity_ / 16
-      || physical_blocks_[cold_block_id].erase_count <= physical_blocks_[block_id].erase_count) {
-      cold_block_id = physical_blocks_[cold_block_id].lru_prev_block_id;
+        || physical_blocks_[cold_block_id].is_worn_out() 
+        || physical_blocks_[cold_block_id].valid_page_count_ 
+          < block_capacity_ * MIN_SIZE_PROPORTION_MIGRATION
+        || physical_blocks_[cold_block_id].erases_ 
+          <= physical_blocks_[block_id].erases_) {
+      if(!physical_blocks_[cold_block_id].is_cold()) {
+        // the block is not cold, later blocks are also not cold
+        return -1;
+      }
+
+      // move to the previous block
+      cold_block_id = physical_blocks_[cold_block_id].lru_prev_block_id_;
       if(cold_block_id == -1) {
+        // reach the top end of the LRU list
         break;
       }
     }
     return cold_block_id;
   }
 
-  uint16_t PickVictimBlock() {
-    double max_benefit_cost_ratio = -1;
-    uint16_t victim_block_id = physical_blocks_.size();
+  /**
+   * Pick a victim block for garbage collection
+   *
+   * Pick a victim block for garbage collection
+   * based on the Cost-Benefit-Ratio policy.
+   * @return victim block id
+   */
+  uint16_t pick_victim_block() {
+    double max_benefit_cost_ratio = -1; // max benefit-cost ratio
+    uint16_t victim_block_id = physical_blocks_.size(); // victim block id
+
+    // traverse all blocks to find the victim block
     for(size_t i = 0; i < physical_blocks_.size(); i++) {
       if(i == cleaning_block_id_) {
+        // skip the cleaning block
         continue;
       }
       auto& block = physical_blocks_[i];
-      if(block.IsWornOut()) {
+      if(block.is_worn_out()) {
+        // skip worn out blocks
         continue;
       }
 
-      double utilization = block.valid_page_count / (double)block_capacity_;
-      double benefit_cost_ratio = (1 - utilization) / (1 + utilization) * (current_ts_ - block.ts);
-      double ration_adjustment = block.erase_count / (double)max_erases_;
-      benefit_cost_ratio *= ration_adjustment;
+      // calculate the benefit-cost ratio
+      double utilization = block.valid_page_count_ / (double)block_capacity_;
+      double benefit_cost_ratio = (1 - utilization) / (1 + utilization)
+        * (current_ts_ - block.ts_);
+      double ration_adjustment = block.erases_ / (double)block_erases_;
+
+      // adjust the ratio based on remaining erases
+      benefit_cost_ratio *= ration_adjustment; 
+
+      // update the max benefit-cost ratio and victim block id
       if(benefit_cost_ratio > max_benefit_cost_ratio) {
         max_benefit_cost_ratio = benefit_cost_ratio;
         victim_block_id = i;
-      } else if(benefit_cost_ratio == max_benefit_cost_ratio && block.valid_page_count < physical_blocks_[victim_block_id].valid_page_count) {
+      } else if(benefit_cost_ratio == max_benefit_cost_ratio
+          && block.valid_page_count_ 
+            < physical_blocks_[victim_block_id].valid_page_count_) {
+        // we prefer the block with less valid pages if the benefit-cost
+        // ratio is the same
         victim_block_id = i;
       }
     }
-    if(victim_block_id != physical_blocks_.size() && physical_blocks_[victim_block_id].valid_page_count == block_capacity_) {
+    if(victim_block_id != physical_blocks_.size()
+        && physical_blocks_[victim_block_id].valid_page_count_
+          == block_capacity_) {
+      // if the found victim block is full, no benefit from cleaning it,
+      // return a invalid block id
       return physical_blocks_.size();
     }
     return victim_block_id;
   }
 
-  uint16_t Migrate(uint16_t block_id, const ExecCallBack<PageType> &func) {
-    auto cold_block_id = PickColdBlock(block_id);
+  /**
+   * Migrate cold data from a cold block to a block
+   *
+   * Migrate cold data from a cold block to a block.
+   * @param block_id block id
+   * @param func function to interact with class Controller
+   * @return cold block id
+   */
+  uint16_t migrate_cold_block(uint16_t block_id
+      , const ExecCallBack<PageType> &func) {
+    auto cold_block_id = find_cold_block(block_id); // find a cold block
     if(cold_block_id == -1) {
+      // no suitable cold block
       return block_id;
     }
+
+    // migrate data from the cold block to the block
     auto& cold_block = physical_blocks_[cold_block_id];
     auto& block = physical_blocks_[block_id];
-    for(size_t i = 0; i < cold_block.mapped_logical_pages.size(); i++) {
-      auto& logical_addr = cold_block.mapped_logical_pages[i];
-      if(logical_addr.IsValid()) {
-        func(OpCode::READ, GetAddress(cold_block_id * block_capacity_ + i));
-        auto new_physical_page_idx = block.WritePage(logical_addr.addr);
-        func(OpCode::WRITE, GetAddress(block_id * block_capacity_ + new_physical_page_idx));
-        lba_to_physical_page_[logical_addr.addr].Set(block_id, new_physical_page_idx);
+    for(size_t i = 0; i < cold_block.mapped_logical_pages_.size(); i++) {
+      auto& logical_addr = cold_block.mapped_logical_pages_[i];
+      if(logical_addr.is_valid()) {
+        // migrate valid page
+        func(OpCode::READ, get_address(cold_block_id * block_capacity_ + i));
+        auto new_physical_page_idx = block.write_page(logical_addr.addr_);
+        func(OpCode::WRITE, get_address(block_id * block_capacity_
+          + new_physical_page_idx));
+        lba_to_physical_page_[logical_addr.addr_].set(
+          block_id, new_physical_page_idx);
       }
     }
-    func(OpCode::ERASE, GetAddress(cold_block_id * block_capacity_));
-    cold_block.Erase();
-    UpdateLRU(block_id);
+
+    // erase the cold block
+    func(OpCode::ERASE, get_address(cold_block_id * block_capacity_));
+    cold_block.erase();
+
+    update_lru(block_id); // update LRU list
     return cold_block_id;
   }
 
-  uint16_t CleanBlock(uint16_t block_id, const ExecCallBack<PageType> &func) {
+  /**
+   * Clean a victim block
+   *
+   * Clean a victim block, move data from the block to the cleaning block.
+   * @param block_id block id
+   * @param func function to interact with class Controller
+   * @return block id
+   */
+  uint16_t clean_block(uint16_t block_id
+      , const ExecCallBack<PageType> &func) {
     auto& cleaning_block = physical_blocks_[cleaning_block_id_];
     auto& block = physical_blocks_[block_id];
-    for(size_t i = 0; i < block.mapped_logical_pages.size(); i++) {
-      auto& logical_addr = block.mapped_logical_pages[i];
-      if(logical_addr.IsValid()) {
-        func(OpCode::READ, GetAddress(block_id * block_capacity_ + i));
-        auto new_physical_page_idx = cleaning_block.WritePage(logical_addr.addr);
-        func(OpCode::WRITE, GetAddress(cleaning_block_id_ * block_capacity_ + new_physical_page_idx));
-        lba_to_physical_page_[logical_addr.addr].Set(cleaning_block_id_, new_physical_page_idx);
+    for(size_t i = 0; i < block.mapped_logical_pages_.size(); i++) {
+      auto& logical_addr = block.mapped_logical_pages_[i];
+      if(logical_addr.is_valid()) {
+        // move valid page
+        func(OpCode::READ, get_address(block_id * block_capacity_ + i));
+        auto new_physical_page_idx = cleaning_block.write_page(
+          logical_addr.addr_);
+        func(OpCode::WRITE, get_address(cleaning_block_id_ * block_capacity_
+          + new_physical_page_idx));
+        lba_to_physical_page_[logical_addr.addr_].set(
+          cleaning_block_id_, new_physical_page_idx);
       }
     }
-    func(OpCode::ERASE, GetAddress(block_id * block_capacity_));
-    block.Erase();
-    UpdateLRU(cleaning_block_id_);
-    if(cleaning_block.erase_count == migrate_threshold_) {
-      block_id = Migrate(block_id, func);
+
+    // erase the block
+    func(OpCode::ERASE, get_address(block_id * block_capacity_));
+    block.erase();
+
+    update_lru(cleaning_block_id_); // update LRU list
+
+    if(block.erases_ == migrate_threshold_) {
+      // trigger cold data migration, try to find a cold block to migrate data
+      // into the victim block
+      block_id = migrate_cold_block(block_id, func);
     }
     
     return block_id;
   }
 
-  bool GarbageCollection(const ExecCallBack<PageType> &func) {
-    DEBUG_INST(std::cout << "[GarbageCollection] [Entry] cleaning block: " << cleaning_block_id_ << ", writing block: " << writing_block_id_ << std::endl)
-    auto victim_block_id = PickVictimBlock();
+  /**
+   * Garbage collection
+   *
+   * Garbage collection, clean a victim block and move data to the cleaning
+   * block. the cleaning block will be the new writing block. And the victim
+   * block will be the new cleaning block.
+   * @param func function to interact with class Controller
+   * @return true if garbage collection is successful
+   */
+  bool garbage_collect(const ExecCallBack<PageType> &func) {
+    DEBUG_INST(std::cout << "[GarbageCollection] [Entry] cleaning block: "
+      << cleaning_block_id_ << ", writing block: " << writing_block_id_
+      << std::endl)
+    auto victim_block_id = pick_victim_block(); // pick a victim block
     if(victim_block_id == physical_blocks_.size()) {
-      // no block can be erased
-      DEBUG_INST(std::cout << "[GarbageCollection] [Failed] no block can be erased" << std::endl)
-      // for(int i = 0; i != physical_blocks_.size(); i++) {
-      //   std::cout << "block: " << i << ", erase count: " << (int)physical_blocks_[i].erase_count << ", valid page count: " << physical_blocks_[i].valid_page_count << std::endl;
-      // }
+      // get a invalid block id, no block can be erased
+      DEBUG_INST(std::cout
+        << "[GarbageCollection] [Failed] no block can be erased" << std::endl)
       return false;
     }
 
-    DEBUG_INST(std::cout << "[GarbageCollection] [Info] victim block: " << victim_block_id << std::endl)
-    victim_block_id = CleanBlock(victim_block_id, func);
+    DEBUG_INST(std::cout << "[GarbageCollection] [Info] victim block: "
+      << victim_block_id << std::endl)
+    // clean the victim block
+    victim_block_id = clean_block(victim_block_id, func); 
+
+    // update writing block id and cleaning block id
     writing_block_id_ = cleaning_block_id_;
     cleaning_block_id_ = victim_block_id;
-    DEBUG_INST(std::cout << "[GarbageCollection] [Success] cleaning block: " << cleaning_block_id_ << ", writing block: " << writing_block_id_ << std::endl)
+    DEBUG_INST(std::cout << "[GarbageCollection] [Success] cleaning block: "
+      << cleaning_block_id_ << ", writing block: " << writing_block_id_
+      << std::endl)
     return true;
   }
 };
@@ -496,7 +825,7 @@ template <typename PageType>
 uint16_t MyFTL<PageType>::page_idx_mask_ = 0;
 
 template <typename PageType>
-size_t MyFTL<PageType>::max_erases_ = 0;
+size_t MyFTL<PageType>::block_erases_ = 0;
 
 template <typename PageType>
 size_t MyFTL<PageType>::current_ts_ = 0;
