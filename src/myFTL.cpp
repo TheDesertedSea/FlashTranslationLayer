@@ -2,17 +2,17 @@
  * @file myFTL.cpp
  * @brief This file contains the implementation of MyFTL class.
  *
- * Implement following functions:
- * - ReadTranslate: Translates lbas to physical addresses for read operations
- * - WriteTranslate: Translates lbas to physical addresses for
+ * Implements following functions:
+ * - ReadTranslate: Translates LBAs to physical addresses for read operations
+ * - WriteTranslate: Translates LBAs to physical addresses for
  *                     write operations
  * - Trim: Trims a lba
  * 
  * Key Features:
- * Used a page-to-page mapping scheme.
- * Used a Cost-Benefit-Ratio based garbage collection policy.
- * Used cold data migration to improve wear leveling.
- * Used an implicit LRU list for quickly finding cold blocks.
+ * Uses a page-to-page mapping scheme.
+ * Uses a Cost-Benefit-Ratio based garbage collection policy.
+ * Uses cold data migration to improve wear leveling.
+ * Uses an implicit LRU list for quickly finding cold blocks.
  *
  * @author Cundao Yu <cundaoy@andrew.cmu.edu>
  */
@@ -38,18 +38,19 @@
  */
 #define MIGRATE_THRESHOLD_RATIO 0.2
 
-/** Cold Data threshold
+/** minimum age of a cold block
  *
- * block with age larger than this threshold will be considered as cold block
+ * One block with age equal to or larger than this threshold will be
+ * considered as a cold block
  */
-#define COLD_DATA_THRESHOLD 100000
+#define MIN_AGE_COLD 100000
 
-/** Minimum size proportion of cold block for migration
+/** Minimum valid count proportion of cold block for migration
  *
  * if the valid page count of a cold block is less than this proportion,
  * it will not be considered for migration 
  */
-#define MIN_SIZE_PROPORTION_MIGRATION 0.9375
+#define MIN_VALID_PROPORTION_MIGRATION 0.9375
 
 /**
  * class MyFTL - MyFTL implementation
@@ -85,6 +86,7 @@ class MyFTL : public FTLBase<PageType> {
     /**
      * Get block id
      *
+     * Valid block id is from 0 to total block number - 1
      * @return block id
      */
     inline uint16_t get_block_id() const {
@@ -94,6 +96,7 @@ class MyFTL : public FTLBase<PageType> {
     /**
      * Get page index
      *
+     * Page index inside the block, from 0 to block size - 1
      * @return page index
      */
     inline uint16_t get_page_idx() const {
@@ -101,7 +104,7 @@ class MyFTL : public FTLBase<PageType> {
     }
 
     /**
-     * Set block id and page index
+     * Set this address with block id and page index
      *
      * @param block_id block id
      * @param page_idx page index
@@ -111,16 +114,16 @@ class MyFTL : public FTLBase<PageType> {
     }
 
     /**
-     * Set block id
+     * Set this address with a LBA
      *
-     * @param block_id block id
+     * @param lba LBA
      */
     inline void set(uint16_t lba) {
       addr_ = lba;
     }
 
     /**
-     * Set invalid
+     * Set this address invalid.
      */
     inline void set_invalid() {
       addr_ = INVALID_PAGE;
@@ -130,15 +133,19 @@ class MyFTL : public FTLBase<PageType> {
   /**
    * struct PhysicalBlock - Physical block
    *
-   * Contains internal information of a physical block.
+   * Stores internal information of a physical block.
    */
   struct PhysicalBlock {
     /**
      * Mapped logical pages
      * 
-     * Indicates which logical page is mapped to for each physical page
-     * in the block. If the MyAddress object is invalid, means the
-     * corresponding physical page is empty or stores outdated data.
+     * Map physical pages to LBAs.
+     * Stores Address objects representing mapped LBAs for each physical pages
+     * in this block. Size of this vector is equal to block size. Access this
+     * vector using the indices of physical pages in this physical block
+     * (from 0 to block size - 1).
+     * If the MyAddress object at an index is invalid, it means the physical
+     * page of this index is empty or stores outdated data.
      */
     std::vector<MyAddress> mapped_logical_pages_;
 
@@ -163,6 +170,8 @@ class MyFTL : public FTLBase<PageType> {
     /**
      * Prev pointer in a implicit LRU list
      *
+     * Access physical_blocks_ in MyFTL class using prev block id
+     * to get the PhysicalBlock object of the prev block.
      * -1: null, >=0: prev block id
      */
     int16_t lru_prev_block_id_;
@@ -170,6 +179,8 @@ class MyFTL : public FTLBase<PageType> {
     /**
      * Next pointer in a implicit LRU list
      *
+     * Access physical_blocks_ in MyFTL class using next block id
+     * to get the PhysicalBlock object of the next block.
      * -1: null, >=0: next block id
      */
     int16_t lru_next_block_id_;
@@ -197,7 +208,7 @@ class MyFTL : public FTLBase<PageType> {
     }
 
     /**
-     * Change related internal states and return the page index for writing on
+     * Update related internal states and return the page index for writing on
      *
      * @param lba lba
      * @return page index for writing on
@@ -210,7 +221,7 @@ class MyFTL : public FTLBase<PageType> {
     }
 
     /**
-     * Change related internal states when a page is moved 
+     * Update related internal states when a page is moved 
      * 
      * @param page_idx page index
      */
@@ -234,7 +245,7 @@ class MyFTL : public FTLBase<PageType> {
      * @return true if the block is cold
      */
     inline bool is_cold() {
-      return current_ts_ - ts_ > COLD_DATA_THRESHOLD;
+      return current_ts_ - ts_ >= MIN_AGE_COLD;
     }
 
     /**
@@ -251,7 +262,7 @@ class MyFTL : public FTLBase<PageType> {
     }
 
     /**
-     * Change related internal states when a page is trimmed
+     * Update related internal states when a page is trimmed
      *
      * @param page_idx page index
      */
@@ -289,25 +300,37 @@ class MyFTL : public FTLBase<PageType> {
 
   /** Number of bits used to represent page index */
   static size_t page_idx_bit_num_;
-  /** Mask to get page index */
+  /** Mask to get page index from a raw address(lba or pba) */
   static uint16_t page_idx_mask_;
 
   /** 
-   * Lba to physical page address mapping
+   * LBA to physical page address mapping
    *
-   * If the address is invalid, means this lba is not written yet
+   * Map LBAs to physical pages.
+   * Size of this vector is equal to total number of LBAs.
+   * Access this vector using LBA as index.
+   * If the address object of a LBA is invalid, means this LBA
+   * is not written yet
    */
   std::vector<MyAddress> lba_to_physical_page_;
-  /** Physical blocks */
+  /** 
+   * Physical blocks 
+   *
+   * Stores PhysicalBlock objects. Each store internal states of a
+   * physical block.
+   * Size of this vector is equal to total number of physical blocks.
+   * Access this vector using block id as index.
+   */
   std::vector<PhysicalBlock> physical_blocks_;
 
-  /** Current block used for writing */
+  /** Id of current block used for writing, all writes go here */
   uint16_t writing_block_id_;
   /** 
-   * Reserved block for cleaning. 
+   * Id of reserved block for cleaning. 
    *
-   * Data in cleaned block will be moved to this block,
-   * and then the cleaning block will be the new writing block
+   * When doing Garbage Collection, data in cleaned block will
+   * be moved to this block, and then the cleaning block will
+   * be the new writing block.
    */
   uint16_t cleaning_block_id_;
   /** 
@@ -359,7 +382,7 @@ class MyFTL : public FTLBase<PageType> {
      on ssd capacity and overprovisioning */
     lba_to_physical_page_.resize(ssd_capacity_ * ((double)(100 - op_) / 100));
 
-    /* Initialize physical blocks */
+    /* Initialize physical blocks, size is the number of physical blocks */
     physical_blocks_.resize(ssd_capacity_ / block_capacity_);
 
     /* Initialize implicit LRU list */
@@ -620,13 +643,14 @@ class MyFTL : public FTLBase<PageType> {
     /* A suitable cold block must satisfy the following conditions:
      * 1. not the block itself
      * 2. not worn out
-     * 3. valid page count is larger than a proportion of the block capacity
-     * 4. erase count is larger than the block's erase count
+     * 3. valid page count is equal to or larger than a proportion
+     *    of the block capacity
+     * 4. erase count is larger than target block's erase count
      */
     while(cold_block_id == block_id 
         || physical_blocks_[cold_block_id].is_worn_out() 
         || physical_blocks_[cold_block_id].valid_page_count_ 
-          < block_capacity_ * MIN_SIZE_PROPORTION_MIGRATION
+          < block_capacity_ * MIN_VALID_PROPORTION_MIGRATION
         || physical_blocks_[cold_block_id].erases_ 
           <= physical_blocks_[block_id].erases_) {
       if(!physical_blocks_[cold_block_id].is_cold()) {
